@@ -22,16 +22,28 @@ stitches every domain's scripts together.
 
 1. **Project + auth foundation — `auth_db`**
    - Run `auth_db/backend/sql/00_init_extensions.sql` (uuid-ossp, pgcrypto).
-   - Deploy the `user-lookup` edge function.
+   - Deploy edge functions: `user-lookup`, `delete-account` (both in `auth_db/backend/edge-functions/`).
 2. **Messaging/encryption — `secure_db` (this repo)**
    - In the Dashboard, create a **private** Storage bucket `message-attachments`
      (1 MB limit) — see `setup/supabase-storage-setup.md`. (Must exist before the SQL.)
    - Run `sql/messaging-schema.sql`.
 3. **Payments — `payments_app`**
    - Run `payments_app/backend/sql/subscription-schema.sql`.
-   - Deploy edge functions `checkout-session`, `create-portal-session`, `stripe-webhook`.
+   - Deploy edge functions (all in `payments_app/backend/edge-functions/`):
+     `checkout-session`, `create-portal-session`, `stripe-webhook`, `list-invoices`, `update-subscription`.
 4. **Budget — `money_tracker`**
    - Run the budget tables (user_months, pots, settings, data_shares, field_locks).
+
+### All edge functions (deploy under these EXACT names — the clients call them)
+| Function | Repo | Secrets |
+|---|---|---|
+| `user-lookup` | auth_db | (service role, auto) |
+| `delete-account` | auth_db | (service role, auto) + `ALLOWED_ORIGIN` |
+| `checkout-session` | payments_app | `STRIPE_SECRET_KEY` |
+| `create-portal-session` | payments_app | `STRIPE_SECRET_KEY` |
+| `stripe-webhook` | payments_app | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` |
+| `list-invoices` | payments_app | `STRIPE_SECRET_KEY` |
+| `update-subscription` | payments_app | `STRIPE_SECRET_KEY` |
 
 ### Auth configuration (Dashboard → Authentication → URL Configuration)
 - Set the **Site URL** and add each app's deployed URL + `…/auth/views/auth.html`
@@ -47,4 +59,4 @@ stitches every domain's scripts together.
 ## Account deletion (nuke)
 Every messaging table FKs `auth.users(... ) ON DELETE CASCADE`, so deleting the
 auth user removes all DB rows. Storage attachment objects are **not** cascaded and
-must be removed explicitly by the `delete-account` edge function (see messaging_app).
+must be removed explicitly by the `delete-account` edge function (in `auth_db`).
