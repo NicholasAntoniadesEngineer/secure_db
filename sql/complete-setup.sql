@@ -506,14 +506,23 @@ CREATE TABLE IF NOT EXISTS message_attachments (
     conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     uploader_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
 
-    -- File metadata (stored unencrypted for querying)
-    file_name TEXT NOT NULL,
-    file_size BIGINT NOT NULL,
-    mime_type TEXT NOT NULL,
-    storage_path TEXT NOT NULL,  -- Path in Supabase Storage bucket
+    -- H-6: file_name / mime_type / EXACT file_size are NO LONGER stored in plaintext
+    -- (a curious server must not learn filenames, types, or exact sizes of E2E files).
+    -- They are sealed client-side into encrypted_metadata (under the conversation's
+    -- invariant attachment KEK) and the server only ever sees a COARSE size bucket.
+    -- The legacy plaintext columns are kept NULLABLE for back-compat reads of rows
+    -- written before this migration; new rows leave them NULL. (Attachments auto-expire
+    -- in 24h, so they can be dropped entirely once no pre-H-6 rows remain.)
+    file_name TEXT,                 -- H-6: legacy/plaintext (nullable; not written by new clients)
+    file_size BIGINT,               -- H-6: legacy/plaintext exact size (nullable; superseded by file_size_bucket)
+    mime_type TEXT,                 -- H-6: legacy/plaintext (nullable; not written by new clients)
+    file_size_bucket BIGINT,        -- H-6: coarse, rounded-up size (no exact byte count leaks)
+    encrypted_metadata TEXT,        -- H-6: client-encrypted {file_name, mime_type, file_size} blob (base64)
+    metadata_nonce TEXT,            -- H-6: nonce for encrypted_metadata (base64)
+    storage_path TEXT NOT NULL,     -- Path in Supabase Storage bucket
 
     -- Encrypted file key (file is encrypted client-side before upload)
-    -- This key is encrypted with the conversation's session key
+    -- This key is encrypted with the conversation's invariant attachment KEK (W3-2)
     encrypted_file_key TEXT,
     file_key_nonce TEXT,
 
@@ -523,9 +532,25 @@ CREATE TABLE IF NOT EXISTS message_attachments (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-COMMENT ON TABLE message_attachments IS 'File attachments for messages. Files expire after 24 hours.';
+-- H-6: ADDITIVE/IDEMPOTENT — on an EXISTING table (where the CREATE above is a no-op)
+-- add the new private-metadata columns and relax the old NOT NULL constraints so new
+-- clients can stop writing the plaintext columns. Never drops or rewrites data.
+ALTER TABLE message_attachments ADD COLUMN IF NOT EXISTS file_size_bucket  BIGINT;
+ALTER TABLE message_attachments ADD COLUMN IF NOT EXISTS encrypted_metadata TEXT;
+ALTER TABLE message_attachments ADD COLUMN IF NOT EXISTS metadata_nonce     TEXT;
+ALTER TABLE message_attachments ALTER COLUMN file_name DROP NOT NULL;
+ALTER TABLE message_attachments ALTER COLUMN file_size DROP NOT NULL;
+ALTER TABLE message_attachments ALTER COLUMN mime_type DROP NOT NULL;
+
+COMMENT ON TABLE message_attachments IS 'File attachments for messages. Files expire after 24 hours. H-6: name/type/exact-size are client-encrypted (encrypted_metadata); only a coarse size bucket is in plaintext.';
 COMMENT ON COLUMN message_attachments.storage_path IS 'Path to encrypted file in Supabase Storage bucket';
-COMMENT ON COLUMN message_attachments.encrypted_file_key IS 'File encryption key, encrypted with conversation session key';
+COMMENT ON COLUMN message_attachments.encrypted_file_key IS 'File encryption key, encrypted with the conversation invariant attachment KEK';
+COMMENT ON COLUMN message_attachments.encrypted_metadata IS 'H-6: client-encrypted JSON {file_name, mime_type, file_size}, sealed under the conversation attachment KEK. Replaces the plaintext columns.';
+COMMENT ON COLUMN message_attachments.metadata_nonce IS 'H-6: secretbox nonce (base64) for encrypted_metadata.';
+COMMENT ON COLUMN message_attachments.file_size_bucket IS 'H-6: file size rounded UP to a coarse bucket so the exact byte count never leaks. Exact size is in encrypted_metadata.';
+COMMENT ON COLUMN message_attachments.file_name IS 'H-6 LEGACY: plaintext name (nullable). Not written by current clients; kept only to read pre-H-6 rows.';
+COMMENT ON COLUMN message_attachments.mime_type IS 'H-6 LEGACY: plaintext MIME (nullable). Not written by current clients; kept only to read pre-H-6 rows.';
+COMMENT ON COLUMN message_attachments.file_size IS 'H-6 LEGACY: plaintext exact size (nullable). Superseded by file_size_bucket + encrypted_metadata.';
 COMMENT ON COLUMN message_attachments.expires_at IS 'Files auto-delete after this time (default 24 hours)';
 
 DROP INDEX IF EXISTS idx_attachments_message_id;
