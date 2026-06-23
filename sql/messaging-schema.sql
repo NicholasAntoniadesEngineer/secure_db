@@ -231,7 +231,9 @@ CREATE POLICY identity_keys_insert_own ON identity_keys
     FOR INSERT WITH CHECK (auth.uid() = user_id);
 
 CREATE POLICY identity_keys_update_own ON identity_keys
-    FOR UPDATE USING (auth.uid() = user_id);
+    FOR UPDATE USING (auth.uid() = user_id)
+    -- HARDENING: WITH CHECK stops a user reassigning their key row to another user_id.
+    WITH CHECK (auth.uid() = user_id);
 
 CREATE POLICY identity_keys_delete_own ON identity_keys
     FOR DELETE USING (auth.uid() = user_id);
@@ -436,6 +438,9 @@ CREATE TRIGGER trigger_update_conversations_updated_at
     EXECUTE FUNCTION update_conversations_updated_at();
 
 GRANT SELECT, INSERT ON conversations TO authenticated;
+-- HARDENING: column-scoped UPDATE so clients can advance conversation ordering
+-- (last_message_at) but cannot rewrite participants or other columns.
+GRANT UPDATE (last_message_at, updated_at) ON conversations TO authenticated;
 GRANT USAGE, SELECT ON SEQUENCE conversations_id_seq TO authenticated;
 
 -- SM-40: conversation_participants table + policies removed (dead, self-only RLS).
@@ -455,6 +460,10 @@ CREATE POLICY conversations_insert_participant ON conversations
 
 CREATE POLICY conversations_update_participant ON conversations
     FOR UPDATE USING (
+        auth.uid() = user1_id OR auth.uid() = user2_id
+    )
+    -- HARDENING: WITH CHECK prevents moving a conversation to other users.
+    WITH CHECK (
         auth.uid() = user1_id OR auth.uid() = user2_id
     );
 
@@ -530,6 +539,16 @@ CREATE POLICY messages_update_participant ON messages
             WHERE conversations.id = messages.conversation_id
             AND (conversations.user1_id = auth.uid() OR conversations.user2_id = auth.uid())
         )
+    )
+    -- HARDENING: WITH CHECK confines updates to the user's own conversations;
+    -- paired with the column-scoped GRANT below (read/read_at only), message
+    -- content and sender stay tamper-proof.
+    WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM conversations
+            WHERE conversations.id = messages.conversation_id
+            AND (conversations.user1_id = auth.uid() OR conversations.user2_id = auth.uid())
+        )
     );
 
 CREATE OR REPLACE FUNCTION update_messages_updated_at()
@@ -549,6 +568,9 @@ CREATE TRIGGER trigger_update_messages_updated_at
     EXECUTE FUNCTION update_messages_updated_at();
 
 GRANT SELECT, INSERT ON messages TO authenticated;
+-- HARDENING: column-scoped UPDATE so a participant can mark messages read (clears
+-- unread counts) WITHOUT being able to alter encrypted_content / sender_id.
+GRANT UPDATE (read, read_at) ON messages TO authenticated;
 GRANT USAGE, SELECT ON SEQUENCE messages_id_seq TO authenticated;
 
 DO $$ BEGIN RAISE NOTICE '[7/9] Creating message attachments system...'; END $$;
