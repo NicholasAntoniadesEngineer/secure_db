@@ -1,4 +1,13 @@
 -- ============================================================
+-- secure_db — COMPLETE MESSAGING SCHEMA (run ONCE on a fresh database)
+-- Single self-contained file: extensions + all messaging tables/policies.
+-- (Identity tables live in auth_db; no cross-FK, either order works.)
+-- ============================================================
+-- Extensions (required on a fresh project; idempotent)
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- ============================================================
 -- SECURE MESSENGER - MESSAGING-ONLY SCHEMA
 -- ============================================================
 -- This is the messaging-only Supabase schema for the standalone
