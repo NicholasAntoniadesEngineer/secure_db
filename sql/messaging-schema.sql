@@ -312,10 +312,14 @@ CREATE POLICY messages_select_participant ON messages
 CREATE POLICY messages_insert_participant ON messages
     FOR INSERT WITH CHECK (
         auth.uid() = sender_id AND
+        messages.recipient_id <> auth.uid() AND
+        -- HARDENING (SDB-01): bind recipient_id to the conversation counterparty so a
+        -- blocked sender cannot set recipient_id = self to bypass is_blocked().
         EXISTS (
-            SELECT 1 FROM conversations
-            WHERE conversations.id = messages.conversation_id
-            AND (conversations.user1_id = auth.uid() OR conversations.user2_id = auth.uid())
+            SELECT 1 FROM conversations c
+            WHERE c.id = messages.conversation_id
+            AND ((c.user1_id = auth.uid() AND c.user2_id = messages.recipient_id)
+              OR (c.user2_id = auth.uid() AND c.user1_id = messages.recipient_id))
         ) AND
         NOT public.is_blocked(messages.recipient_id, auth.uid())
     );
