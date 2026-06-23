@@ -20,13 +20,21 @@ stitches every domain's scripts together.
 
 ## First-time initialisation runbook (run in THIS order)
 
-1. **Project + auth foundation — `auth_db`**
+1. **Project + auth + identity foundation — `auth_db`**
    - Run `auth_db/backend/sql/00_init_extensions.sql` (uuid-ossp, pgcrypto).
+   - Run `auth_db/backend/sql/identity-schema.sql` — the **canonical identity / E2E-crypto
+     schema** (identity_keys, public_key_history, identity_key_backups, paired_devices,
+     device_keys, key_rotation_locks, pairing_requests). The encryption subsystem
+     (`auth_db/encryption`) and device pairing depend on these. **Destructive (DROPs) —
+     fresh install only.** To add pairing to an EXISTING DB, run
+     `auth_db/backend/sql/add-device-pairing.sql` instead (non-destructive).
    - Deploy edge functions: `user-lookup`, `delete-account` (both in `auth_db/backend/edge-functions/`).
-2. **Messaging/encryption — `secure_db` (this repo)**
+2. **Messaging — `secure_db` (this repo)**
    - In the Dashboard, create a **private** Storage bucket `message-attachments`
      (1 MB limit) — see `setup/supabase-storage-setup.md`. (Must exist before the SQL.)
-   - Run `sql/messaging-schema.sql`.
+   - Run `sql/messaging-schema.sql` — messaging tables only (conversations, messages,
+     attachments, conversation_session_keys, friends, blocked_users). Identity tables
+     now live in auth_db (step 1); there are no cross-FKs between the two.
 3. **Payments — `payments_app`**
    - Run `payments_app/backend/sql/subscription-schema.sql`.
    - Deploy edge functions (all in `payments_app/backend/edge-functions/`):
