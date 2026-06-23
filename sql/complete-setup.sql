@@ -71,7 +71,9 @@ DROP FUNCTION IF EXISTS update_conversations_updated_at() CASCADE;
 DROP FUNCTION IF EXISTS update_messages_updated_at() CASCADE;
 DROP FUNCTION IF EXISTS cleanup_expired_attachments() CASCADE;
 DROP FUNCTION IF EXISTS update_session_keys_updated_at() CASCADE;
-DROP FUNCTION IF EXISTS update_key_backups_updated_at() CASCADE;
+-- SDB-06: removed orphan `DROP FUNCTION update_key_backups_updated_at` — that
+-- function/table (identity_key_backups) lives in auth_db, never in this messaging
+-- schema, so the drop referenced an object this file does not own.
 -- SM-15: SECURITY DEFINER helper for server-side block enforcement
 DROP FUNCTION IF EXISTS is_blocked(UUID, UUID) CASCADE;
 -- SM-30: SECURITY DEFINER helper for download-count increment
@@ -84,7 +86,9 @@ DROP POLICY IF EXISTS "Users can delete attachments" ON storage.objects;
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
--- pgcrypto provides gen_random_uuid() used by public_key_history (no-op on Supabase, already present)
+-- SDB-06: pgcrypto kept for gen_random_uuid()/crypto availability (no-op on
+-- Supabase, already present). The old comment referenced public_key_history, which
+-- is an identity table that lives in auth_db, not in this messaging schema.
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 DO $$ BEGIN RAISE NOTICE '[2/9] Creating friends system...'; END $$;
@@ -235,9 +239,11 @@ CREATE TRIGGER trigger_update_conversations_updated_at
     EXECUTE FUNCTION update_conversations_updated_at();
 
 GRANT SELECT, INSERT ON conversations TO authenticated;
--- HARDENING: column-scoped UPDATE so clients can advance conversation ordering
--- (last_message_at) but cannot rewrite participants or other columns.
-GRANT UPDATE (last_message_at, updated_at) ON conversations TO authenticated;
+-- SDB-07: column-scoped UPDATE so clients can advance conversation ordering
+-- (last_message_at) but cannot rewrite participants or other columns. updated_at is
+-- trigger-written (trigger_update_conversations_updated_at sets it to NOW() on every
+-- UPDATE), so it is intentionally NOT granted — clients must not write it directly.
+GRANT UPDATE (last_message_at) ON conversations TO authenticated;
 GRANT USAGE, SELECT ON SEQUENCE conversations_id_seq TO authenticated;
 
 -- SM-40: conversation_participants table + policies removed (dead, self-only RLS).
@@ -333,23 +339,24 @@ CREATE POLICY messages_insert_participant ON messages
         NOT public.is_blocked(messages.recipient_id, auth.uid())
     );
 
+-- SDB-04: only the RECIPIENT may mark a message read. Marking read/read_at is a
+-- read-receipt action that belongs to the receiver; the previous policy let either
+-- participant flip it on any message in the conversation (including the sender on
+-- their own outbound message). USING restricts the targetable rows to messages
+-- addressed to the caller AND in one of the caller's conversations; WITH CHECK
+-- re-asserts the recipient binding on the NEW row. Paired with the column-scoped
+-- GRANT below (read/read_at only), message content and sender stay tamper-proof.
 CREATE POLICY messages_update_participant ON messages
     FOR UPDATE USING (
+        recipient_id = auth.uid() AND
         EXISTS (
             SELECT 1 FROM conversations
             WHERE conversations.id = messages.conversation_id
             AND (conversations.user1_id = auth.uid() OR conversations.user2_id = auth.uid())
         )
     )
-    -- HARDENING: WITH CHECK confines updates to the user's own conversations;
-    -- paired with the column-scoped GRANT below (read/read_at only), message
-    -- content and sender stay tamper-proof.
     WITH CHECK (
-        EXISTS (
-            SELECT 1 FROM conversations
-            WHERE conversations.id = messages.conversation_id
-            AND (conversations.user1_id = auth.uid() OR conversations.user2_id = auth.uid())
-        )
+        recipient_id = auth.uid()
     );
 
 CREATE OR REPLACE FUNCTION update_messages_updated_at()
@@ -659,8 +666,11 @@ CREATE POLICY session_keys_select_own ON conversation_session_keys
 CREATE POLICY session_keys_insert_own ON conversation_session_keys
     FOR INSERT WITH CHECK (auth.uid() = user_id);
 
+-- SDB-05: WITH CHECK stops the owner reassigning a session-key row to another
+-- user_id on update (the previous policy validated only the OLD row via USING).
 CREATE POLICY session_keys_update_own ON conversation_session_keys
-    FOR UPDATE USING (auth.uid() = user_id);
+    FOR UPDATE USING (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
 
 CREATE POLICY session_keys_delete_own ON conversation_session_keys
     FOR DELETE USING (auth.uid() = user_id);
