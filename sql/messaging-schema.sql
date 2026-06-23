@@ -573,6 +573,40 @@ GRANT SELECT, INSERT ON messages TO authenticated;
 GRANT UPDATE (read, read_at) ON messages TO authenticated;
 GRANT USAGE, SELECT ON SEQUENCE messages_id_seq TO authenticated;
 
+-- ============================================================
+-- DEVICE PAIRING: pairing_requests (code-wrapped key handoff for multi-device)
+-- The bundle (identity secret + session backup key) is PBKDF2+AES-GCM encrypted
+-- under a one-time high-entropy code BEFORE storage; rows are RLS-owner-scoped,
+-- single-use, and expiring. UPDATE is column-scoped to the attempt counter.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS pairing_requests (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    encrypted_data TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    attempts INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_requests_user_id ON pairing_requests(user_id);
+ALTER TABLE pairing_requests ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS pairing_requests_select_own ON pairing_requests;
+CREATE POLICY pairing_requests_select_own ON pairing_requests
+    FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS pairing_requests_insert_own ON pairing_requests;
+CREATE POLICY pairing_requests_insert_own ON pairing_requests
+    FOR INSERT WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS pairing_requests_update_own ON pairing_requests;
+CREATE POLICY pairing_requests_update_own ON pairing_requests
+    FOR UPDATE USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS pairing_requests_delete_own ON pairing_requests;
+CREATE POLICY pairing_requests_delete_own ON pairing_requests
+    FOR DELETE USING (auth.uid() = user_id);
+GRANT SELECT, INSERT, DELETE ON pairing_requests TO authenticated;
+GRANT UPDATE (attempts) ON pairing_requests TO authenticated;
+GRANT USAGE, SELECT ON SEQUENCE pairing_requests_id_seq TO authenticated;
+
 DO $$ BEGIN RAISE NOTICE '[7/9] Creating message attachments system...'; END $$;
 
 -- ============================================================
