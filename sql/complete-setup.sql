@@ -78,6 +78,12 @@ DROP FUNCTION IF EXISTS update_session_keys_updated_at() CASCADE;
 DROP FUNCTION IF EXISTS is_blocked(UUID, UUID) CASCADE;
 -- SM-30: SECURITY DEFINER helper for download-count increment
 DROP FUNCTION IF EXISTS increment_attachment_download_count(BIGINT) CASCADE;
+-- is_premium_active(UUID) is intentionally NOT dropped here. Messaging is FREE, so no
+-- messages policy references it; but we still ship the fail-closed bootstrap below (the
+-- Premium gate lives on the money_tracker data_shares owner-INSERT in the all-in-one DB)
+-- and maintain it with CREATE OR REPLACE; payments_app/complete-setup.sql later
+-- CREATE-OR-REPLACEs it with the full subscriptions-backed body. Using CREATE OR REPLACE
+-- (not DROP) avoids tearing down anything that may already depend on the predicate.
 
 -- Drop storage policies (SM-05: re-scoped below to conversation participants / uploader)
 DROP POLICY IF EXISTS "Users can upload attachments" ON storage.objects;
@@ -186,6 +192,62 @@ AS $$
 $$;
 
 GRANT EXECUTE ON FUNCTION is_blocked(UUID, UUID) TO authenticated;
+
+-- ============================================================
+-- PREMIUM-ENTITLEMENT PREDICATE (server-authoritative) — BOOTSTRAP DEFINITION
+-- ============================================================
+-- PRODUCT DECISION: MESSAGING IS FREE. The Premium feature is cross-user SHARING, gated
+-- on the money_tracker data_shares owner-INSERT (which lives in the all-in-one DB that
+-- this messaging schema is deployed into). This file no longer references the predicate
+-- in any messages policy. We still ship the fail-closed bootstrap definition here so the
+-- predicate exists for that data_shares gate regardless of file-load order, and so the
+-- standalone messaging schema stays self-consistent. (Kept per the product spec.)
+--
+-- The authoritative `subscriptions`/`subscription_plans` tables and the FULL body of
+-- this function live in payments_app/backend/sql/complete-setup.sql, which the runbook
+-- runs AFTER this messaging schema (auth_db -> secure_db -> payments_app -> money_tracker).
+-- So at THIS file's run time the subscriptions table may not exist yet. We therefore
+-- define a fail-CLOSED bootstrap here that:
+--   * returns the real predicate when `subscriptions` is present, and
+--   * returns FALSE (deny) when it is not — so the gate never fail-opens.
+-- payments_app then CREATE-OR-REPLACEs this with the same predicate (sans the
+-- table-existence guard, since by then the tables are guaranteed present). The combined
+-- money_tracker installer creates subscriptions BEFORE messages, so its copy is the
+-- full predicate directly.
+--
+-- premium == (status='active' AND plan=Premium)
+--         OR (status='trial'  AND trial_end > NOW())   -- expired trial => NOT premium
+--
+-- SECURITY DEFINER + pinned search_path so the RLS gate can evaluate it for any caller;
+-- it reads only the passed uid's single row and returns a boolean (no data leak).
+CREATE OR REPLACE FUNCTION is_premium_active(p_uid UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    -- Fail closed if the subscriptions schema is not installed yet (deny, never allow).
+    IF to_regclass('public.subscriptions') IS NULL
+       OR to_regclass('public.subscription_plans') IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    RETURN EXISTS (
+        SELECT 1
+        FROM subscriptions s
+        JOIN subscription_plans p ON p.id = s.plan_id
+        WHERE s.user_id = p_uid
+          AND (
+                (s.status = 'active' AND p.name = 'Premium')
+             OR (s.status = 'trial'  AND s.trial_end IS NOT NULL AND s.trial_end > NOW())
+          )
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION is_premium_active(UUID) TO authenticated;
 
 DO $$ BEGIN RAISE NOTICE '[5/9] Creating conversations and participants...'; END $$;
 
@@ -353,6 +415,12 @@ CREATE POLICY messages_select_participant ON messages
 -- be able to INSERT, even if they bypass the client guard and call PostgREST
 -- directly. is_blocked() is SECURITY DEFINER because blocked_users_select_own hides
 -- the recipient's block rows from the sender's own context.
+-- PRODUCT DECISION (H-3 revision): MESSAGING IS FREE. There is NO Premium check on this
+-- INSERT — any conversation participant may send a message. The Premium gate now lives
+-- on cross-user SHARING (the money_tracker data_shares owner-INSERT), not on messaging.
+-- The is_premium_active() bootstrap predicate is still defined above (kept fail-closed)
+-- because the shared all-in-one project gates data_shares with it; messaging just does
+-- not reference it any more.
 CREATE POLICY messages_insert_participant ON messages
     FOR INSERT WITH CHECK (
         auth.uid() = sender_id AND
