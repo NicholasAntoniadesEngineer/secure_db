@@ -291,10 +291,39 @@ CREATE TABLE IF NOT EXISTS messages (
     read BOOLEAN DEFAULT FALSE,
     read_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    -- FORWARD SECRECY: Double Ratchet header + X3DH first-message bootstrap
+    -- (FORWARD_SECRECY_DESIGN.md §3/§4). All NULLABLE + additive: header fields are
+    -- non-secret and pre-cutover rows leave them NULL (rendered as legacy/unavailable).
+    ratchet_pub    TEXT,      -- header.dh  : sender's current ratchet public key (base64)
+    prev_chain_len INTEGER,   -- header.pn  : # messages in the previous sending chain
+    msg_num        INTEGER,   -- header.n   : message number within the current chain
+    x3dh_ik        TEXT,      -- initiator X25519 identity public (first msg only)
+    x3dh_ik_sign   TEXT,      -- initiator Ed25519 identity-signing public (TOFU pin)
+    x3dh_ek        TEXT,      -- initiator ephemeral public EK_a (first msg only)
+    x3dh_spk_id    INTEGER,   -- which of the recipient's signed prekeys was used
+    x3dh_opk_id    INTEGER    -- which of the recipient's one-time prekeys was used (NULL = SPK-only)
 );
 
+-- ADDITIVE / IDEMPOTENT: ensure the ratchet+X3DH columns exist on an EXISTING messages
+-- table (the CREATE TABLE IF NOT EXISTS above is a no-op once the table exists, so on a
+-- live DB these ADD COLUMN IF NOT EXISTS statements are what actually add them). Safe to
+-- re-run; never drops or rewrites existing data. key_epoch is kept (now vestigial).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS ratchet_pub    TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS prev_chain_len INTEGER;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS msg_num        INTEGER;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS x3dh_ik        TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS x3dh_ik_sign   TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS x3dh_ek        TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS x3dh_spk_id    INTEGER;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS x3dh_opk_id    INTEGER;
+
 COMMENT ON COLUMN messages.key_epoch IS 'Session key epoch used to encrypt this message. Enables decryption with correct key version after key rotations.';
+COMMENT ON COLUMN messages.ratchet_pub IS 'Double Ratchet header: sender ratchet public key (base64). NULL on pre-forward-secrecy rows.';
+COMMENT ON COLUMN messages.prev_chain_len IS 'Double Ratchet header.pn: number of messages in the previous sending chain.';
+COMMENT ON COLUMN messages.msg_num IS 'Double Ratchet header.n: message number within the current sending chain.';
+COMMENT ON COLUMN messages.x3dh_ik IS 'X3DH first-message preamble: initiator X25519 identity public key. NULL except on the bootstrap message.';
+COMMENT ON COLUMN messages.x3dh_opk_id IS 'X3DH first-message preamble: recipient one-time prekey id consumed (NULL = SPK-only X3DH fallback).';
 
 DROP INDEX IF EXISTS idx_messages_conversation_id;
 DROP INDEX IF EXISTS idx_messages_sender_id;
