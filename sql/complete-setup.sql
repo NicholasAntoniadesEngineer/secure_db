@@ -388,6 +388,15 @@ CREATE POLICY messages_update_participant ON messages
         recipient_id = auth.uid()
     );
 
+-- DELETE-FOR-EVERYONE ("unsend"): only the SENDER may hard-delete a message, and
+-- the row is removed for BOTH parties (privacy-first hard delete, no tombstone).
+-- USING restricts the targetable rows to messages the caller sent; there is no
+-- WITH CHECK because DELETE evaluates only USING (no NEW row). The recipient cannot
+-- delete (no matching row), and the FK ON DELETE CASCADE on message_attachments
+-- cleans up any attached files' rows automatically.
+CREATE POLICY messages_delete_own ON messages
+    FOR DELETE USING (auth.uid() = sender_id);
+
 CREATE OR REPLACE FUNCTION update_messages_updated_at()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -408,6 +417,9 @@ GRANT SELECT, INSERT ON messages TO authenticated;
 -- HARDENING: column-scoped UPDATE so a participant can mark messages read (clears
 -- unread counts) WITHOUT being able to alter encrypted_content / sender_id.
 GRANT UPDATE (read, read_at) ON messages TO authenticated;
+-- DELETE-FOR-EVERYONE: table-level DELETE privilege; the messages_delete_own RLS
+-- policy above further restricts it to the row's sender.
+GRANT DELETE ON messages TO authenticated;
 GRANT USAGE, SELECT ON SEQUENCE messages_id_seq TO authenticated;
 
 -- ============================================================
@@ -622,12 +634,22 @@ $$;
 -- ============================================================
 -- REALTIME CONFIGURATION FOR MESSAGES
 -- ============================================================
--- Enable Supabase Realtime on the messages table
--- REPLICA IDENTITY FULL is required for filters to work with Realtime
+-- Enable Supabase Realtime on the messages table.
+-- REPLICA IDENTITY FULL is REQUIRED for two reasons:
+--   1. Conversation-filtered subscriptions (filter: conversation_id=eq.N) to work.
+--   2. DELETE-FOR-EVERYONE: on a DELETE, Postgres only emits the OLD row's
+--      replica-identity columns in the WAL. With the default (PRIMARY KEY) identity
+--      the realtime DELETE payload would carry ONLY the id, so the recipient's
+--      conversation-filtered channel could not match it (no old.conversation_id) and
+--      the recipient would never drop the unsent message. FULL makes the OLD row
+--      carry every column (incl. conversation_id, sender_id), so the recipient's
+--      `conversation_id=eq.N` subscription matches the DELETE and removes the bubble.
 ALTER TABLE messages REPLICA IDENTITY FULL;
 
--- Add the messages table to the supabase_realtime publication
--- This enables real-time subscriptions for the messages table
+-- Add the messages table to the supabase_realtime publication.
+-- A publication with no FOR-operation clause streams INSERT, UPDATE *and* DELETE by
+-- default, so adding `messages` here is sufficient for the DELETE event to flow to
+-- subscribers — no extra publication change is needed for delete-for-everyone.
 -- Note: Run this command. If the publication doesn't exist, create it first.
 DO $$
 BEGIN
